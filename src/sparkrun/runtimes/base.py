@@ -828,6 +828,7 @@ class RuntimePlugin(Plugin):
                 for key in ("GLOO_SOCKET_IFNAME", "NCCL_SOCKET_IFNAME", "MN_IF_NAME", "TP_SOCKET_IFNAME"):
                     all_env[key] = host_ip
                 all_env["NODE_IP"] = host_ip
+                all_env["VLLM_HOST_IP"] = host_ip
             except RuntimeError:
                 logger.warning("Could not detect IP for %s, skipping socket override", host)
 
