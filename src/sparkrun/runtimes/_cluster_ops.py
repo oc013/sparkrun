@@ -243,6 +243,7 @@ def launch_containers_parallel(
     executor: Executor,
     comm_env: ClusterCommEnv | None,
     extra_docker_opts: list[str] | None = None,
+    resolved_ips: dict[str, str] | None = None,
 ) -> int:
     """Launch sleep-infinity containers in parallel.
 
@@ -251,14 +252,33 @@ def launch_containers_parallel(
     head, wifi on a worker) each see the right ``*_SOCKET_IFNAME``
     values instead of the head's interface being broadcast cluster-wide.
 
-    Returns 0 on success, 1 on first failure.
+    Args:
+        resolved_ips: Mapping of host -> management IP. When provided and
+            bridge network is active, socket interface vars are set to
+            the host's management IP instead of relying on interface names.
+
+    Returns:
+        0 on success, 1 on first failure.
     """
     from sparkrun.orchestration.ssh import run_remote_script
+
+    is_bridge = executor.config.network != "host"
 
     with ThreadPoolExecutor(max_workers=len(containers)) as pool:
         futures = {}
         for host, cname in containers:
             host_nccl_env = comm_env.get_env(host) if comm_env else None
+
+            # Override socket interfaces with host management IP for bridge mode
+            if is_bridge and resolved_ips and host in resolved_ips:
+                host_ip = resolved_ips[host]
+                if host_nccl_env is None:
+                    host_nccl_env = {}
+                for key in ("GLOO_SOCKET_IFNAME", "NCCL_SOCKET_IFNAME", "MN_IF_NAME", "TP_SOCKET_IFNAME"):
+                    host_nccl_env[key] = host_ip
+                host_nccl_env["NODE_IP"] = host_ip
+                host_nccl_env["VLLM_HOST_IP"] = host_ip
+
             script = executor.generate_launch_script(
                 image=ctx.image,
                 container_name=cname,
@@ -267,6 +287,7 @@ def launch_containers_parallel(
                 volumes=ctx.volumes,
                 nccl_env=host_nccl_env,
                 extra_docker_opts=extra_docker_opts,
+                host_ip=resolved_ips.get(host) if is_bridge and resolved_ips else None,
             )
             future = pool.submit(
                 run_remote_script,
@@ -346,7 +367,6 @@ def exec_serve_on_container(
 
 # ---------------------------------------------------------------------------
 # Full native cluster orchestration
-# ---------------------------------------------------------------------------
 
 
 def _attach_foreground(runtime: RuntimePlugin, ctx: ClusterContext, follow: bool) -> None:
@@ -499,12 +519,20 @@ def run_native_cluster(
 
     containers = [(host, cname) for host, _rank, cname in all_nodes]
     combined_docker_opts = (runtime.get_extra_docker_opts() or []) + (extra_docker_opts or [])
+    # Add init port publishing when using bridge network (rootless Docker compatibility)
+    if executor.config.network and executor.config.network != "host":
+        combined_docker_opts.extend(["-p", f"{init_port}:{init_port}"])
+
+    # Map each host to its resolved management IP for bridge network socket vars
+    resolved_ips = dict(zip(ctx.hosts, resolved_hosts))
+
     rc = launch_containers_parallel(
         ctx,
         containers,
         executor,
         comm_env,
         extra_docker_opts=combined_docker_opts or None,
+        resolved_ips=resolved_ips,
     )
     if rc != 0:
         return rc

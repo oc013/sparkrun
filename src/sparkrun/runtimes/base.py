@@ -817,6 +817,21 @@ class RuntimePlugin(Plugin):
             self.get_extra_env(),  # tuning/other overrides
         )
 
+        # Detect host management IP for bridge network socket vars
+        is_bridge = self.executor.config.network != "host"
+        host_ip = None
+        if is_bridge and not dry_run:
+            from sparkrun.orchestration.primitives import detect_host_ip
+
+            try:
+                host_ip = detect_host_ip(host, ssh_kwargs=ssh_kwargs, dry_run=False)
+                for key in ("GLOO_SOCKET_IFNAME", "NCCL_SOCKET_IFNAME", "MN_IF_NAME", "TP_SOCKET_IFNAME"):
+                    all_env[key] = host_ip
+                all_env["NODE_IP"] = host_ip
+                all_env["VLLM_HOST_IP"] = host_ip
+            except RuntimeError:
+                logger.warning("Could not detect IP for %s, skipping socket override", host)
+
         combined_docker_opts = (self.get_extra_docker_opts() or []) + (extra_docker_opts or [])
 
         # Step 1: InfiniBand detection (skip if pre-detected comm_env provided)
@@ -862,6 +877,7 @@ class RuntimePlugin(Plugin):
             volumes=volumes,
             nccl_env=comm_env.get_env(host) if comm_env else None,
             extra_docker_opts=combined_docker_opts or None,
+            host_ip=host_ip if is_bridge else None,
         )
         result = run_script_on_host(
             host,
